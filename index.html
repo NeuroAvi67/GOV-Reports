@@ -1,0 +1,167 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Government Report Generator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pptxgenjs/3.12.0/pptxgen.bundle.js"></script>
+<style>
+:root{--bg:#f4f6fa;--card:#fff;--tx:#1b2430;--pri:#1F3A5F;--bd:#d8dee8}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1520;--card:#18212f;--tx:#e8edf5;--pri:#5b8bd6;--bd:#2b384a}}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{background:#1F3A5F;color:#fff;padding:16px 20px}h1{margin:0;font-size:20px}
+main{max-width:860px;margin:auto;padding:16px}.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:16px}
+label{display:block;font-size:13px;margin:10px 0 4px;font-weight:600}
+input,select,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid var(--bd);background:var(--bg);color:var(--tx);font:inherit}
+textarea{min-height:140px}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{background:var(--pri);color:#fff;border:0;padding:12px 18px;border-radius:8px;font:inherit;cursor:pointer;margin-top:14px}
+button:disabled{opacity:.5}
+button.s{background:transparent;color:var(--pri);border:1px solid var(--pri);padding:6px 10px;margin:0 4px 0 0}
+.item{border-top:1px solid var(--bd);padding:12px 0}.m{font-size:12px;opacity:.7}
+pre{white-space:pre-wrap;font-size:12px;background:var(--bg);padding:10px;border-radius:8px}
+details summary{cursor:pointer;font-weight:600}
+</style></head><body>
+<header><h1>🏛️ Government Report Generator (Gemini + Groq)</h1></header>
+<main>
+<div class="card"><details><summary>API Keys (saved only in this browser)</summary>
+<div class="row"><div><label>Gemini API Key</label><input id="gk" type="password"></div><div><label>Groq API Key</label><input id="qk" type="password"></div></div>
+<div class="row"><div><label>Groq vision model (for images)</label><input id="qv" value="meta-llama/llama-4-scout-17b-16e-instruct"></div><div></div></div>
+<div class="row"><div><label>Gemini model</label><input id="gm" value="gemini-2.0-flash"></div><div><label>Groq model</label><input id="qm" value="llama-3.3-70b-versatile"></div></div>
+</details></div>
+<div class="card">
+<label>Department / Office</label><input id="dept" placeholder="e.g. Public Works Department">
+<div class="row"><div><label>AI Provider</label><select id="prov"><option value="gemini">Gemini</option><option value="groq">Groq</option></select></div>
+<div><label>Output Format</label><select id="fmt"><option value="pdf">PDF</option><option value="ppt">PowerPoint (PPTX)</option><option value="image">Image (PNG)</option><option value="video">Video (WebM)</option></select></div></div>
+<label>Instructions</label><textarea id="ins" placeholder="Describe the report: topic, data, audience, sections, tone..."></textarea>
+<label>Upload data (images, PDF, PPTX)</label>
+<input id="up" type="file" multiple accept="image/*,.pdf,.pptx">
+<div id="fl" class="m"></div>
+<button id="go">Generate Report</button><div id="st" class="m" style="margin-top:10px"></div>
+</div>
+<div class="card"><b>Saved Reports (inputs &amp; outputs)</b> <button class="s" id="exp">Export all data (JSON)</button><div id="list"></div></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const SYSTEM=`You are an official drafting assistant for Government departments.
+Write formal, neutral, factual, policy-appropriate reports in clear administrative language.
+Follow the officer's instructions exactly. Never invent statistics, names, or legal citations;
+if data is missing, write "[Data to be provided]". Use structure: purpose, background, findings, recommendations, conclusion where relevant.
+Respond ONLY with JSON: {"title":string,"department":string,"summary":string,"sections":[{"heading":string,"body":string,"bullets":[string]}]}`;
+// ---- settings ----
+['gk','qk','gm','qm','qv'].forEach(k=>{const v=localStorage.getItem('gr_'+k);if(v)$(k).value=v;$(k).onchange=()=>localStorage.setItem('gr_'+k,$(k).value)});
+// ---- IndexedDB storage ----
+const dbp=new Promise((res,rej)=>{const r=indexedDB.open('govreports',1);r.onupgradeneeded=()=>r.result.createObjectStore('r',{keyPath:'id'});r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
+const tx=async(m,f)=>{const d=await dbp;return new Promise((res,rej)=>{const t=d.transaction('r',m),q=f(t.objectStore('r'));t.oncomplete=()=>res(q.result);t.onerror=()=>rej(t.error)})};
+const putR=r=>tx('readwrite',s=>s.put(r)),allR=()=>tx('readonly',s=>s.getAll()),delR=id=>tx('readwrite',s=>s.delete(id));
+// ---- uploads ----
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+let files=[];
+function showF(){const box=$('fl');box.innerHTML='';files.forEach((f,i)=>{const d=document.createElement('div');d.textContent='📎 '+f.name+' ('+Math.round(f.size/1024)+' KB) ';const x=document.createElement('a');x.textContent='remove';x.href='#';x.onclick=e=>{e.preventDefault();files.splice(i,1);showF()};d.appendChild(x);box.appendChild(d)})}
+$('up').onchange=e=>{files=[...files,...e.target.files];e.target.value='';showF()};
+const b64=f=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(f)});
+const dec=t=>t.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
+async function pptxText(f){const z=await JSZip.loadAsync(f);const n=Object.keys(z.files).filter(k=>/^ppt\/slides\/slide\d+\.xml$/.test(k)).sort((a,b)=>a.match(/\d+/)[0]-b.match(/\d+/)[0]);let o='';
+  for(let i=0;i<n.length;i++){const x=await z.files[n[i]].async('string');o+=`\n[Slide ${i+1}] `+[...x.matchAll(/<a:t[^>]*>([^<]*)<\/a:t>/g)].map(m=>dec(m[1])).join(' ')}return o}
+async function pdfText(f){const d=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;let o='';
+  for(let i=1;i<=d.numPages;i++){const c=await(await d.getPage(i)).getTextContent();o+=`\n[Page ${i}] `+c.items.map(t=>t.str).join(' ')}return o}
+async function prepare(prov){
+  const texts=[],media=[];let total=0;
+  for(const f of files){total+=f.size;const n=f.name.toLowerCase();
+    if(f.type.startsWith('image/'))media.push({mime:f.type,data:await b64(f),name:f.name});
+    else if(n.endsWith('.pdf')){if(prov==='gemini')media.push({mime:'application/pdf',data:await b64(f),name:f.name});else texts.push(`--- ${f.name} ---`+await pdfText(f))}
+    else if(n.endsWith('.pptx'))texts.push(`--- ${f.name} ---`+await pptxText(f));
+    else throw new Error(f.name+': only images, PDF and PPTX are supported (old .ppt must be saved as .pptx)')}
+  if(total>15e6)throw new Error('Uploaded files are too large (limit about 15 MB total)');
+  return{texts:texts.join('\n\n').slice(0,80000),media}}
+// ---- AI ----
+const jsonOf=t=>JSON.parse(t.match(/\{[\s\S]*\}/)[0]);
+async function callLLM(p,prompt,att){
+  if(att.texts)prompt+='\n\nContent extracted from uploaded documents (base the report on this):\n'+att.texts;
+  if(att.media.length)prompt+='\n\nUploaded images/documents are attached. Base the report on them.';
+  if(p==='groq'){
+    if(!$('qk').value)throw new Error('Enter Groq API key');
+    const imgs=att.media.slice(0,5);let body;
+    if(imgs.length)body={model:$('qv').value,messages:[{role:'user',content:[{type:'text',text:SYSTEM+'\n\n'+prompt},...imgs.map(m=>({type:'image_url',image_url:{url:`data:${m.mime};base64,${m.data}`}}))]}],temperature:.3};
+    else body={model:$('qm').value,messages:[{role:'system',content:SYSTEM},{role:'user',content:prompt}],response_format:{type:'json_object'},temperature:.3};
+    const r=await fetch('https://api.groq.com/openai/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+$('qk').value},body:JSON.stringify(body)});
+    const j=await r.json();if(!r.ok)throw new Error(j.error?.message||'Groq error');return jsonOf(j.choices[0].message.content);
+  }
+  if(!$('gk').value)throw new Error('Enter Gemini API key');
+  const parts=[{text:prompt},...att.media.map(m=>({inlineData:{mimeType:m.mime,data:m.data}}))];
+  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${$('gm').value}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':$('gk').value},body:JSON.stringify({systemInstruction:{parts:[{text:SYSTEM}]},contents:[{role:'user',parts}],generationConfig:{responseMimeType:'application/json',temperature:.3}})});
+  const j=await r.json();if(!r.ok)throw new Error(j.error?.message||'Gemini error');return jsonOf(j.candidates[0].content.parts[0].text);
+}
+// ---- helpers ----
+const sec=s=>[s.body||'',...(s.bullets||[]).map(b=>'• '+b)].filter(Boolean);
+function wrapCanvas(ctx,t,maxW){const out=[];let l='';for(const w of String(t).split(/\s+/)){const x=l?l+' '+w:w;if(ctx.measureText(x).width>maxW&&l){out.push(l);l=w}else l=x}if(l)out.push(l);return out}
+function drawHeader(c,w,title){c.fillStyle='#fff';c.fillRect(0,0,w,c.canvas.height);c.fillStyle='#1F3A5F';c.fillRect(0,0,w,90);c.fillStyle='#fff';c.font='bold 30px sans-serif';c.fillText(title.slice(0,70),30,58)}
+function blocks(r){return [{h:'Summary',t:[r.summary]},...r.sections.map(s=>({h:s.heading,t:sec(s)}))]}
+// ---- renderers ----
+function toPDF(r){
+  const d=new jspdf.jsPDF(),W=180;let y=20;
+  const line=(t,sz,b)=>{d.setFontSize(sz);d.setFont('helvetica',b?'bold':'normal');d.splitTextToSize(String(t),W).forEach(l=>{if(y>280){d.addPage();y=20}d.text(l,15,y);y+=sz*.5+2})};
+  line(r.title,18,1);line(r.department||'',11);y+=4;
+  blocks(r).forEach(b=>{y+=3;line(b.h,14,1);b.t.forEach(t=>line(t,11))});
+  return d.output('blob');
+}
+async function toPPT(r){
+  const p=new PptxGenJS();p.layout='LAYOUT_WIDE';
+  let s=p.addSlide();s.background={color:'1F3A5F'};
+  s.addText(r.title,{x:.6,y:2,w:12,h:1.5,fontSize:36,bold:true,color:'FFFFFF'});
+  s.addText(r.department||'',{x:.6,y:3.6,w:12,fontSize:18,color:'DDDDDD'});
+  blocks(r).forEach(b=>{const sl=p.addSlide();sl.addText(b.h,{x:.6,y:.4,fontSize:28,bold:true,color:'1F3A5F'});
+    sl.addText(b.t.map(t=>({text:t.replace(/^• /,''),options:{bullet:t.startsWith('• '),breakLine:true}})),{x:.6,y:1.3,w:12,h:5.5,fontSize:16,valign:'top'})});
+  return p.write({outputType:'blob'});
+}
+function toImage(r){
+  const c=document.createElement('canvas'),x=c.getContext('2d');c.width=1000;c.height=100;
+  x.font='22px sans-serif';const L=[];
+  blocks(r).forEach(b=>{L.push({h:b.h});b.t.forEach(t=>wrapCanvas(x,t,940).forEach(l=>L.push({t:l})));L.push({t:''})});
+  c.height=140+L.length*32+40;drawHeader(x,1000,r.title);let y=140;
+  L.forEach(l=>{y+=32;if(l.h){x.font='bold 26px sans-serif';x.fillStyle='#1F3A5F';x.fillText(l.h,30,y)}else{x.font='22px sans-serif';x.fillStyle='#222';x.fillText(l.t,30,y)}});
+  return new Promise(res=>c.toBlob(res,'image/png'));
+}
+async function toVideo(r){
+  const c=document.createElement('canvas');c.width=1280;c.height=720;const x=c.getContext('2d');
+  const slides=[{h:r.department||'',t:[r.title]},...blocks(r)];
+  const rec=new MediaRecorder(c.captureStream(10),{mimeType:MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm'}),ch=[];
+  rec.ondataavailable=e=>e.data.size&&ch.push(e.data);const done=new Promise(res=>rec.onstop=()=>res(new Blob(ch,{type:'video/webm'})));
+  rec.start();
+  for(const s of slides){drawHeader(x,1280,r.title);x.fillStyle='#1F3A5F';x.font='bold 34px sans-serif';x.fillText(s.h,40,160);
+    x.font='26px sans-serif';x.fillStyle='#222';let y=215;
+    s.t.forEach(t=>wrapCanvas(x,t,1200).forEach(l=>{if(y<700){x.fillText(l,40,y);y+=38}}));
+    await new Promise(r=>setTimeout(r,5000))}
+  rec.stop();return done;
+}
+const EXT={pdf:'pdf',ppt:'pptx',image:'png',video:'webm'};
+// ---- UI ----
+const dl=(b,n)=>{const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=n;a.click()};
+async function refresh(){
+  const rs=(await allR()).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+  $('list').innerHTML=rs.length?'':'<p class="m">No reports yet.</p>';
+  rs.forEach(x=>{const d=document.createElement('div');d.className='item';
+    d.innerHTML=`<b></b><div class="m"></div><div style="margin-top:8px"><button class="s dn">Download</button><button class="s v">View data</button><button class="s d">Delete</button></div><pre hidden></pre>`;
+    d.querySelector('b').textContent=x.output.title;
+    d.querySelector('.m').textContent=`${x.format.toUpperCase()} · ${x.provider} · ${new Date(x.createdAt).toLocaleString()}`;
+    d.querySelector('pre').textContent='INPUT:\n'+x.input+(x.uploads&&x.uploads.length?'\n\nUPLOADED FILES: '+x.uploads.join(', '):'')+'\n\nOUTPUT:\n'+JSON.stringify(x.output,null,2);
+    d.querySelector('.dn').onclick=()=>dl(x.file,`report_${x.id}.${EXT[x.format]}`);
+    d.querySelector('.v').onclick=()=>{const p=d.querySelector('pre');p.hidden=!p.hidden};
+    d.querySelector('.d').onclick=async()=>{if(confirm('Delete?')){await delR(x.id);refresh()}};
+    $('list').appendChild(d)});
+}
+$('go').onclick=async()=>{
+  const ins=$('ins').value.trim(),fmt=$('fmt').value,prov=$('prov').value;if(!ins&&!files.length)return $('st').textContent='Enter instructions';
+  $('go').disabled=true;
+  try{
+    $('st').textContent='AI is drafting the report…';
+    $('st').textContent='Reading uploaded files…';const att=await prepare(prov);$('st').textContent='AI is drafting the report…';
+    const rep=await callLLM(prov,`Department: ${$('dept').value||'Not specified'}\nInstructions:\n${ins}`,att);
+    $('st').textContent=fmt==='video'?'Recording video (about 5 sec per slide, keep this tab open)…':'Building file…';
+    const file=await({pdf:toPDF,ppt:toPPT,image:toImage,video:toVideo}[fmt])(rep);
+    const id=Date.now().toString(36);
+    await putR({id,createdAt:new Date().toISOString(),provider:prov,format:fmt,department:$('dept').value,input:ins,uploads:files.map(f=>f.name),output:rep,file});
+    dl(file,`report_${id}.${EXT[fmt]}`);$('st').textContent='Done ✔ Downloaded and saved below.';refresh();
+  }catch(e){$('st').textContent='Error: '+e.message}
+  $('go').disabled=false};
+$('exp').onclick=async()=>{const rs=(await allR()).map(({file,...r})=>r);dl(new Blob([JSON.stringify(rs,null,2)],{type:'application/json'}),'reports_data.json')};
+refresh();
+</script></body></html>
